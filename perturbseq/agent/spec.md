@@ -24,6 +24,14 @@ bash perturbseq/model/run_model.sh
 
 Validation
 - After env setup, run `python -c "import torch; import scanpy as sc"` to validate core libs.
+- When a check needs more than a one-liner, create a dedicated inspection script under `perturbseq/analysis/` or `perturbseq/agent/` and run it. For example, after downloading data write an `inspect_data.py` to load the matrices/`AnnData` and report shapes, cell/gene counts, `obsm['gRNA_counts']` presence, and NT vs. perturbed group sizes:
+
+```bash
+# inspect a downloaded / prepared dataset before running the pipeline
+python perturbseq/analysis/xx.script/inspect_data.py --h5ad perturbseq/00.data/{GSE}.h5ad
+```
+
+- Such check scripts are inspection-only: they may import from `perturbseq/model/` but never modify it, and should print a clear pass/fail summary for easy verification.
 
 Read-only policy and wrapper entrypoints
 - `perturbseq/model/` is read-only. Do not edit files in that directory.

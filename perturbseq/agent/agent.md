@@ -20,6 +20,8 @@ Workflow (Plan → Act → Check)
 - Plan: produce an explicit `Implementation Plan` describing datasets, input files, venv packages, commands to run GRIT, and downstream analysis steps. I will ask: "Does this plan look biologically and technically sound?"
 - Act: after your approval, create/activate the `perturb` venv, install packages, download the specified GEO datasets, run data preparation, execute GRIT, and run downstream analyses and plotting scripts.
 - Check: validate each stage with smoke-tests and artifact checks (file existence, basic sanity metrics, import tests). For plots, check that expected numbers of genes/targets appear and that volcano plots show non-empty significant sets. On failure, produce an actionable error report and attempt fixes when safe.
+  - When a validation step needs more than a one-line check, the agent may create a dedicated, single-purpose script (under `perturbseq/analysis/` or `perturbseq/agent/`) to perform the inspection and run it. For example, after a GEO download create an `inspect_data.py` that loads the downloaded matrices/`AnnData` and reports shapes, cell/gene counts, `obsm['gRNA_counts']` presence, NT vs. perturbed group sizes, and obvious QC red flags. Likewise, write small check scripts to inspect intermediate `h5ad` files, GRIT output tables, or plot inputs before proceeding to the next stage.
+  - These check scripts are inspection-only utilities: they import from `perturbseq/model/` if needed but never modify it, and they should print a clear pass/fail summary so the result is easy to verify and reproduce.
 
 Agent usage
 - Follow the numbered steps in `setup.md` to create the virtualenv and install packages.
