@@ -39,8 +39,11 @@ Read-only policy and wrapper entrypoints
 - Example wrapper commands:
 
 ```bash
-# download GEO datasets and optionally build h5ad from 10x matrices
-python perturbseq/analysis/xx.script/01.download_geo.py --series GSE142078, GSE278572, GSE208240, GSE252965, GSE272457, GSE280506, GSE311503 --outdir perturbseq/00.data --build-h5ad
+# download GEO datasets (format-aware; --extract unpacks any *.tar archives)
+python perturbseq/analysis/xx.script/01.download_geo.py \
+    --series GSE142078,GSE157977,GSE208240,GSE236057,GSE252965,GSE272457,GSE278572,GSE280506,GSE311503 \
+    --outdir perturbseq/analysis/00.data --extract
+# (or --series all for every configured series)
 
 # run full pipeline (data prep -> GRIT -> downstream analysis)
 python perturbseq/analysis/xx.script/03.run_pipeline.py --h5ad path/to/input.h5ad --output-prefix perturbseq/01.result

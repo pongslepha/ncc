@@ -42,12 +42,22 @@ The numbered scripts under `analysis/xx.script/` run in order.
 
 ### 1. Download — `01.download_geo.py`
 
-The seven target series (GSE142078, GSE208240, GSE252965, GSE272457,
-GSE278572, GSE280506, GSE311503) do **not** share a layout. The downloader is
-format-aware: it inspects each series' GEO `suppl/` listing and picks the right
-files per series "kind" (legacy CellRanger triples, combined multi-feature
-triples, `filtered_feature_bc_matrix.h5`, separate GEX+guide matrices, or a big
-`*.tar.gz`). GSE252965 is ATAC-seq only and is skipped with a warning.
+The nine target series (GSE142078, GSE157977, GSE208240, GSE236057, GSE252965,
+GSE272457, GSE278572, GSE280506, GSE311503) do **not** share a layout. The
+downloader is format-aware: it inspects each series' GEO `suppl/` listing and
+picks the right files per series "kind" (legacy CellRanger triples, combined
+multi-feature triples, `filtered_feature_bc_matrix.h5`, separate GEX+guide
+matrices, a non-standard-named GEX matrix + guide-in-metadata, or a big
+`*.tar`/`*.tar.gz`).
+
+Two series are downloaded but **cannot** feed the canonical pipeline:
+- **GSE252965** — ATAC-seq only (no gene+guide matrix); skipped at download.
+- **GSE157977** — mouse perturb-seq whose guides are recorded only as
+  protospacer *sequences* in per-sample dial-out UMI CSVs, with no
+  protospacer→gene reference and no non-targeting (NT) label deposited. The
+  `RAW.tar` is downloaded for reference, but `02`/`03` skip it (the missing
+  guide→gene map / NT control makes `guide_map.csv` underivable). Both
+  exclusions are recorded in `00.data/logs/anomalies.md`.
 
 ```bash
 python analysis/xx.script/01.download_geo.py \
@@ -75,11 +85,16 @@ model expects:
 ```
 
 Input shapes are auto-selected per series (override with `--shape`):
-`combined_triple`, `h5_multifeature`, `split_gex_guide`, `legacy_lookup`.
+`combined_triple`, `lookup`, `metadata_guide_matrix`, `h5_multifeature`,
+`split_gex_guide`. `metadata_guide_matrix` (GSE236057) reads a non-standard
+GEX matrix (`Counts.mtx` + `GeneNames.tsv` + `Barcodes.tsv`) and synthesizes a
+CRISPR Guide Capture block from the wide boolean guide-by-cell matrix embedded
+in `Metadata.csv` (`Neg_*`→NT, `Pos_<GENE>`→gene, `Enh<N>_*`→enhancer locus).
 Per-series rules derive each gRNA's target gene, detect non-targeting (NT)
 guides, and pass model knobs (e.g. `--guide-detection-umi 3` to handle ambient
 guide contamination). With `--run-prepare` it then invokes the read-only
-`model/prepare_perturb_h5ad.py` on each normalized dir.
+`model/prepare_perturb_h5ad.py` on each normalized dir. Pipeline-incompatible
+series (GSE157977) are skipped here with an anomaly entry.
 
 ```bash
 python analysis/xx.script/02.prepare_h5ad.py \

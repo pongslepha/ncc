@@ -8,7 +8,7 @@ Purpose
 
 Primary responsibilities
 - Environment provisioning: create and manage a `perturb` virtualenv and record installed packages.
-- Data acquisition: download raw or processed single-cell RNA-seq and gRNA metadata from GEO for target datasets, including GSE142078, GSE278572, GSE208240, GSE252965, GSE272457, GSE280506, and GSE311503.
+- Data acquisition: download raw or processed single-cell RNA-seq and gRNA metadata from GEO for target datasets, including GSE142078, GSE157977, GSE208240, GSE236057, GSE252965, GSE272457, GSE278572, GSE280506, and GSE311503. Two of these are downloaded for reference but are NOT Perturb-seq-pipeline-compatible: GSE252965 (ATAC-seq only) and GSE157977 (guides recorded only as protospacer sequences, with no protospacer→gene reference or NT label); both are skipped downstream with anomaly-log entries.
 - Data prep: run and validate `prepare_perturb_h5ad.py` or alternative ingestion wrappers to produce a Scanpy `AnnData` with `X`, `obsm['gRNA_counts']`, and guide metadata.
 - Model training/inference: run GRIT training/inference entrypoints in `model/` and produce the canonical output files (cell-level results, GRIT score metadata, DE-like gene lists).
 - Downstream analysis: single-cell QC, normalization, dimensionality reduction, clustering, and cell-state inference using model outputs and `gRNA_counts`.
