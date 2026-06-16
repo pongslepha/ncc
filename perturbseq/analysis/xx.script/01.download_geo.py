@@ -4,7 +4,7 @@
 This script lives under ``perturbseq/analysis/`` and never modifies anything
 under ``perturbseq/model/``.
 
-The seven target series do NOT share a single layout. Each is handled
+The nine target series do NOT share a single layout. Each is handled
 according to how its authors deposited the data on GEO (discovered by
 inspecting the series ``suppl/`` listings):
 
@@ -12,9 +12,23 @@ inspecting the series ``suppl/`` listings):
                                triples (barcodes/genes/matrix) + a separate
                                *_Cell_Guide_Lookup.csv.gz (gene expr only;
                                guides live in the lookup CSV).
+  GSE157977  raw_tar_guide_dialout
+                               GSE157977_RAW.tar -> per-sample legacy mm10 GEX
+                               .h5 + a per-sample guide "dial-out" UMI count
+                               CSV whose columns are protospacer SEQUENCES.
+                               compatible=False: GEO ships no protospacer->gene
+                               reference and no NT label, so guide_map / NT
+                               cannot be derived; 02/03 skip it (see note).
   GSE208240  series_tar        one big *_filtered.tar.gz; GEX and gRNA are
                                deposited as SEPARATE matrices (GSM ..,gex /
                                ..,guide) that 02.prepare_h5ad.py merges.
+  GSE236057  series_named_matrix
+                               series-level GEX matrix under NON-standard names
+                               (*_Counts.mtx.gz + *_GeneNames.tsv.gz [name,id,
+                               type order] + *_Barcodes.tsv.gz) plus a
+                               *_Metadata.csv.gz that embeds a WIDE boolean
+                               guide-by-cell matrix (Enh*/Pos_*/Neg_* columns).
+                               02 synthesizes the CRISPR block from it.
   GSE252965  atac_incompatible ATAC-seq bigWig only -> NOT a Perturb-seq
                                gene+guide dataset. Skipped with a warning.
   GSE272457  series_triples    several series-level 10X triples, one per
@@ -40,13 +54,14 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import re
 import sys
 import tarfile
 import urllib.request
 from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urlsplit
+
+import geo_utils
 
 GEO_FTP_BASE = "https://ftp.ncbi.nlm.nih.gov/geo/series"
 
@@ -59,10 +74,23 @@ SERIES_CONFIG: dict[str, dict] = {
         "compatible": True,
         "note": "Legacy CellRanger v2 triples + separate Cell_Guide_Lookup.csv.",
     },
+    "GSE157977": {
+        "kind": "raw_tar_guide_dialout",
+        "compatible": False,
+        "note": "RAW.tar: per-sample mm10 GEX .h5 + guide dial-out UMI CSV whose "
+                "columns are protospacer sequences; no seq->gene reference or NT "
+                "label is deposited, so it cannot feed prepare_perturb_h5ad.py.",
+    },
     "GSE208240": {
         "kind": "series_tar",
         "compatible": True,
         "note": "Big *_filtered.tar.gz with SEPARATE GEX and guide matrices.",
+    },
+    "GSE236057": {
+        "kind": "series_named_matrix",
+        "compatible": True,
+        "note": "Non-standard-named GEX triple (Counts/GeneNames/Barcodes) + a "
+                "Metadata.csv.gz embedding a wide boolean guide-by-cell matrix.",
     },
     "GSE252965": {
         "kind": "atac_incompatible",
@@ -94,6 +122,8 @@ SERIES_CONFIG: dict[str, dict] = {
 # File-name patterns used to pick the relevant files out of a suppl listing.
 TRIPLE_SUFFIXES = ("_barcodes.tsv.gz", "_features.tsv.gz", "_matrix.mtx.gz")
 BARE_TRIPLE = ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")
+# Non-standard names used by GSE236057's series-level matrix + guide metadata.
+NAMED_MATRIX_KEYS = ("counts.mtx", "genenames", "barcodes", "metadata")
 # Auxiliary guide/identity files that are cheap and useful to keep.
 AUX_PATTERNS = (
     "protospacer_calls",
@@ -210,7 +240,9 @@ def select_files(kind: str, files: list[str]) -> list[str]:
         # also keep the bare triple if present (GEX-only fallback)
         chosen += [f for f in files if is_triple(f) and f not in chosen]
         return chosen
-    if kind in ("series_tar", "raw_tar_legacy"):
+    if kind == "series_named_matrix":
+        return [f for f in files if any(k in low[f] for k in NAMED_MATRIX_KEYS)]
+    if kind in ("series_tar", "raw_tar_legacy", "raw_tar_guide_dialout"):
         return [f for f in files if f.lower().endswith((".tar", ".tar.gz", ".tgz"))]
     return []
 
@@ -246,16 +278,29 @@ def _safe_extractall(tar: tarfile.TarFile, dest: Path) -> None:
 def download_series(series: str, outdir: Path, extract: bool) -> Path | None:
     cfg = SERIES_CONFIG[series]
     kind = cfg["kind"]
-    series_dir = outdir / series
-    print(f"\n=== {series}  [{kind}] ===")
-    print(f"    {cfg['note']}")
+    log = geo_utils.get_logger(outdir, "download")
+    series_dir = geo_utils.raw_root(outdir) / series
+    log.info("\n=== %s  [%s] ===", series, kind)
+    log.info("    %s", cfg["note"])
 
     if kind == "atac_incompatible":
-        print(
-            f"  [WARN] {series} is {cfg['note']} It cannot be turned into a\n"
-            f"         Perturb-seq h5ad by prepare_perturb_h5ad.py and is SKIPPED.\n"
-            f"         (Remove it from --series, or supply the matching gene+guide\n"
-            f"          matrices separately if you have them.)"
+        log.warning(
+            "  [WARN] %s is %s It cannot be turned into a Perturb-seq h5ad by "
+            "prepare_perturb_h5ad.py and is SKIPPED.", series, cfg["note"],
+        )
+        geo_utils.append_anomaly(
+            outdir, series, "Incompatible assay (ATAC-seq) — skipped",
+            observation=(
+                "GEO metadata reports library_strategy=ATAC-seq and the only "
+                "supplementary file is a single bigWig; there is no gene-expression "
+                "+ CRISPR-guide count matrix."
+            ),
+            action=(
+                "Marked kind='atac_incompatible' in SERIES_CONFIG so the downloader "
+                "warns and skips it instead of fetching unusable data; excluded from "
+                "the prepare step. Supply matching GEX+guide matrices if available."
+            ),
+            logger=log,
         )
         return None
 
@@ -265,23 +310,60 @@ def download_series(series: str, outdir: Path, extract: bool) -> Path | None:
     try:
         available = list_suppl_files(series)
     except Exception as exc:  # noqa: BLE001
-        print(f"  [FAIL] could not list suppl/ for {series}: {exc}")
+        log.error("  [FAIL] could not list suppl/ for %s: %s", series, exc)
+        geo_utils.append_anomaly(
+            outdir, series, "Could not list GEO suppl/ directory",
+            observation=f"Listing {series_suppl_url(series)} raised: {exc}",
+            action="Skipped this series; check network access / GEO availability and retry.",
+            logger=log,
+        )
         return None
 
     wanted = select_files(kind, available)
     if not wanted:
-        print(f"  [WARN] no matching files found in suppl/ for kind '{kind}'.")
-        print(f"         available: {available}")
+        log.warning("  [WARN] no matching files found in suppl/ for kind '%s'.", kind)
+        log.warning("         available: %s", available)
+        geo_utils.append_anomaly(
+            outdir, series, f"No files matched kind '{kind}'",
+            observation=f"suppl/ listing was {available}",
+            action="Left series un-downloaded; the SERIES_CONFIG 'kind' or file "
+                   "selection rule may need updating for this series' layout.",
+            logger=log,
+        )
         return None
 
     ok = True
     for name in wanted:
         ok &= download_file(base + name, series_dir / name)
 
-    if extract and kind in ("series_tar", "raw_tar_legacy"):
+    if extract and kind in ("series_tar", "raw_tar_legacy", "raw_tar_guide_dialout"):
         extract_archives(series_dir)
 
-    print(f"  done: {series_dir}  ({'OK' if ok else 'with errors'})")
+    if not ok:
+        geo_utils.append_anomaly(
+            outdir, series, "One or more files failed to download",
+            observation=f"Expected files: {wanted}",
+            action="Re-run 01.download_geo.py to resume; download_file skips "
+                   "complete files and retries partial ones.",
+            logger=log,
+        )
+
+    # Some series download fine but cannot feed the canonical Perturb-seq
+    # pipeline (e.g. guides recorded only as protospacer sequences with no
+    # seq->gene reference). Record that here so 02/03 can skip them knowingly.
+    if not cfg.get("compatible", True):
+        log.warning("  [NOTE] %s downloaded but is NOT pipeline-compatible.", series)
+        geo_utils.append_anomaly(
+            outdir, series, "Downloaded but not Perturb-seq-pipeline-compatible",
+            observation=cfg["note"],
+            action="Raw data kept for reference; 02.prepare_h5ad.py / "
+                   "03.inspect_data.py skip the prepare step for this series. "
+                   "Supply the missing reference (e.g. protospacer->gene map) to "
+                   "enable it.",
+            logger=log,
+        )
+
+    log.info("  done: %s  (%s)", series_dir, "OK" if ok else "with errors")
     return series_dir
 
 
@@ -314,16 +396,18 @@ def main() -> None:
     )
     args = parser.parse_args()
 
+    log = geo_utils.get_logger(args.outdir, "download")
     if args.series.strip().lower() == "all":
         series_list = sorted(SERIES_CONFIG)
     else:
         series_list = parse_series(args.series)
+    log.info("Downloading %d series into %s", len(series_list), geo_utils.raw_root(args.outdir))
 
     unknown = [s for s in series_list if s not in SERIES_CONFIG]
     if unknown:
-        print(
-            f"WARNING: unconfigured series will be skipped: {', '.join(unknown)}\n"
-            f"         configured: {', '.join(sorted(SERIES_CONFIG))}"
+        log.warning(
+            "unconfigured series will be skipped: %s (configured: %s)",
+            ", ".join(unknown), ", ".join(sorted(SERIES_CONFIG)),
         )
 
     results: dict[str, str] = {}
@@ -333,10 +417,10 @@ def main() -> None:
         path = download_series(series, args.outdir, args.extract)
         results[series] = str(path) if path else "skipped/failed"
 
-    print("\n=== summary ===")
+    log.info("\n=== summary ===")
     for series in series_list:
         if series in SERIES_CONFIG:
-            print(f"  {series}: {results.get(series, 'n/a')}")
+            log.info("  %s: %s", series, results.get(series, "n/a"))
 
 
 if __name__ == "__main__":
