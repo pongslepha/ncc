@@ -1,0 +1,66 @@
+# ENV PACKAGES — perturb (conda env)
+#
+# conda env: perturb   |   python: Python 3.11.15   |   recorded: 2026-06-16
+# location: /home/sehwahong/miniconda3/envs/perturb
+# regenerate: conda activate perturb && pip freeze > perturbseq/agent/env_packages.md
+#
+anndata==0.12.16
+array-api-compat==1.15.0
+certifi==2026.5.20
+charset-normalizer==3.4.7
+contourpy==1.3.3
+cycler==0.12.1
+donfig==0.8.1.post1
+filelock==3.29.0
+fonttools==4.63.0
+fsspec==2026.4.0
+GEOparse==2.0.4
+google-crc32c==1.8.0
+gseapy==1.2.1
+h5py==3.16.0
+idna==3.18
+igraph==1.0.0
+Jinja2==3.1.6
+joblib==1.5.3
+kiwisolver==1.5.0
+legacy-api-wrap==1.5
+leidenalg==0.12.0
+llvmlite==0.47.0
+MarkupSafe==3.0.3
+matplotlib==3.11.0
+mpmath==1.3.0
+narwhals==2.22.1
+natsort==8.4.0
+networkx==3.6.1
+numba==0.65.1
+numcodecs==0.16.5
+numpy==2.4.6
+packaging @ file:///home/conda/feedstock_root/build_artifacts/bld/rattler-build_packaging_1777103621/work
+pandas==2.3.3
+patsy==1.0.2
+pillow==12.2.0
+pynndescent==0.6.0
+pyparsing==3.3.2
+python-dateutil==2.9.0.post0
+python-igraph==1.0.0
+pytz==2026.2
+PyYAML==6.0.3
+requests==2.34.2
+scanpy==1.11.5
+scikit-learn==1.9.0
+scipy==1.17.1
+scverse-misc==0.0.3
+seaborn==0.13.2
+session-info2==0.4.1
+six==1.17.0
+statsmodels==0.14.6
+sympy==1.14.0
+texttable==1.7.0
+threadpoolctl==3.6.0
+torch==2.12.0+cpu
+tqdm==4.68.2
+typing_extensions==4.15.0
+tzdata==2026.2
+umap-learn==0.5.12
+urllib3==2.7.0
+zarr==3.1.6
