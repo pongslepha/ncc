@@ -34,16 +34,18 @@ Input shapes handled (auto-selected by --series, override with --shape):
                    a WIDE boolean guide-by-cell matrix (Enh*/Pos_*/Neg_* cols);
                    a CRISPR Guide Capture block is SYNTHESIZED from the TRUE
                    cells (Neg_* -> NT, Pos_<GENE> -> <GENE>, Enh<N>_* -> Enh<N>).
+  dialout          GSE157977
+                   GEX-only (legacy CellRanger v2 mm10) .h5 per sample + a
+                   separate "dial-out" perturbation-barcode-by-cell UMI CSV.
+                   The PBC->gene map comes from guide_map.csv (built from the
+                   paper's Table S5: 2 sgRNAs pooled to 1 dial-out barcode per
+                   gene, GFP control -> NT). A CRISPR Guide Capture block is
+                   SYNTHESIZED from the dial-out matrix (one feature per gene's
+                   perturbation barcode).
   h5_multifeature  (generic override) read_10x_h5(gex_only=False) when a single
                    .h5 already contains CRISPR Guide Capture features.
   split_gex_guide  (generic override) separate GEX and gRNA matrices merged on
                    shared barcodes.
-
-Incompatible series (downloaded by 01 for reference, but skipped here):
-  GSE157977        guides recorded only as protospacer sequences in a per-sample
-                   dial-out UMI CSV; no protospacer->gene reference and no NT
-                   label are deposited, so guide_map / the required NT control
-                   cannot be derived. See INCOMPATIBLE_SERIES below.
 
 Usage:
     python 02.prepare_h5ad.py --series GSE311503 \
@@ -144,7 +146,12 @@ SERIES_RULES: dict[str, dict] = {
         "nt_regex": r"(?i)^non.?targeting",
         "strip_regex": r"_G?\d+$",   # e.g. CHD8_G3 -> CHD8
         "mt_pattern": r"^MT-",
-        # Synthetic guide counts are 1 UMI/cell, so relax the UMI threshold.
+        # Cell_Guide_Lookup.csv format differs by run: Run1 (GSM4219575) is
+        # (CellBarcode, sgRNA) only -> NO count column -> CRISPR block synthesized
+        # at 1 UMI/guide; Run2/Run3 (GSM4219576/77) add a 'Count' column -> real
+        # per-guide UMIs are used. Cells are already author-called single-guide, so
+        # keep the UMI threshold permissive (the model's single-guide filter still
+        # applies). NOTE: guide_umi is thus not comparable across these runs.
         "prepare_args": ["--min-guide-umi", "1"],
     },
     # GSE236057: GEX matrix under non-standard names + a Metadata.csv embedding a
@@ -159,18 +166,27 @@ SERIES_RULES: dict[str, dict] = {
         "mt_pattern": r"^MT-",
         "prepare_args": ["--min-guide-umi", "1"],
     },
+    # GSE157977 (in vivo Perturb-seq, mouse brain, CellRanger v2 mm10): GEX-only
+    # .h5 per sample + a separate dial-out perturbation-barcode UMI CSV. The
+    # PBC->gene map is guide_map.csv, built from the paper's Table S5 (the
+    # protospacer->gene reference GEO omits); GFP control -> NT. Mouse mito
+    # genes are lower-cased ('mt-Nd1'), so mt_pattern is '^mt-'.
+    # Dial-out PBC UMIs are low-depth (median top-guide UMI ~2) and ambient-
+    # heavy, so the default min_guide_umi=5 keeps almost nothing. Setting both
+    # the detection and call thresholds to 3 UMIs keeps cells whose dominant
+    # perturbation barcode clears 3 UMIs while no other barcode does -- i.e.
+    # confident single-perturbation cells (validated: ~14-60 -> ~500-740/sample).
+    "GSE157977": {
+        "shape": "dialout",
+        "nt_regex": r"(?i)^(gfp|nt)",
+        "mt_pattern": r"^mt-",
+        "prepare_args": ["--guide-detection-umi", "3", "--min-guide-umi", "3"],
+    },
 }
 
 # Series that 01 downloads for reference but that CANNOT feed the canonical
 # Perturb-seq pipeline; main() skips them with an explanatory anomaly entry.
-INCOMPATIBLE_SERIES: dict[str, str] = {
-    "GSE157977": (
-        "Guides are recorded only as protospacer SEQUENCES in a per-sample "
-        "dial-out UMI CSV; GEO deposits no protospacer->gene reference and no "
-        "non-targeting (NT) label, so guide_map (grna->target_gene) and the NT "
-        "control that prepare_perturb_h5ad.py requires cannot be derived."
-    ),
-}
+INCOMPATIBLE_SERIES: dict[str, str] = {}
 
 
 # ---------------------------------------------------------------------------
@@ -458,8 +474,10 @@ def _merge_gex_guide(
 #   GSE142078 -> *_Cell_Guide_Lookup.csv (CellBarcode,sgRNA; bare barcodes)
 #   GSE208240 -> cell_identities.csv (guide_identity; paired/multiplet, "-N" gemgroup)
 #   GSE280506 -> cell_identities.csv (guide_identity; "*" = unassigned, "-N" gemgroup)
-# A CRISPR Guide Capture block is synthesized (1 UMI per assigned guide); the
-# model's single-guide / min-UMI filters then drop multiplet cells.
+# A CRISPR Guide Capture block is built from the per-cell calls, using the real
+# per-guide UMI counts when the source deposits them (UMI_count/read_count/Count)
+# and falling back to 1 UMI/guide otherwise; the model's single-guide / min-UMI
+# filters then drop multiplet cells.
 # ---------------------------------------------------------------------------
 _UNASSIGNED = {"", "*", "n/a", "na", "none", "nan", "unassigned"}
 
@@ -487,10 +505,38 @@ def _read_lookup(lookup_path: Path) -> pd.DataFrame:
     if sg_col is None:
         sg_col = next((c for c in lk.columns if re.search(r"(?i)sgrna|guide|grna|protospacer", c)),
                       lk.columns[-1])
+    # per-guide UMI count, when deposited (UMI_count > read_count > Count/num_umis);
+    # ";"-separated and aligned with guide_identity for multi-guide cells.
+    cnt_col = next((c for c in lk.columns if re.search(r"(?i)umi.?count|num.?umis?", c)), None)
+    if cnt_col is None:
+        cnt_col = next((c for c in lk.columns if re.search(r"(?i)read.?count|^count$", c)), None)
     out = lk[[bc_col, sg_col]].copy()
     out.columns = ["barcode", "guide"]
     out["barcode"] = out["barcode"].astype(str)
     out["guide"] = out["guide"].astype(str)
+    out["count"] = lk[cnt_col].astype(str) if cnt_col else "1"
+    log = _CTX.get("log")
+    if cnt_col:
+        msg = (f"  guide UMIs: REAL counts from column {cnt_col!r} "
+               f"(lookup '{lookup_path.name}')")
+        log.info(msg) if log else print(msg)
+    else:
+        msg = (f"  guide UMIs: SYNTHESIZED 1 UMI/guide -- no count column in "
+               f"lookup '{lookup_path.name}'; guide_umi is not quantitative here")
+        log.warning(msg) if log else print(msg)
+        _anomaly(
+            "Guide UMI counts synthesized (no count column)",
+            observation=(
+                f"lookup '{lookup_path.name}' has columns {list(lk.columns)} with no "
+                "UMI/read/Count column; the CRISPR block was filled with 1 UMI per "
+                "author-called guide."
+            ),
+            action=(
+                "Fine for single-guide target labels (gene/is_nt), but do NOT use "
+                "guide_umi / gRNA_counts quantitatively or compare guide-UMI "
+                "distributions across runs/series for this sample."
+            ),
+        )
     return out
 
 
@@ -548,10 +594,17 @@ def _build_from_lookup(
 ):
     lk = _read_lookup(lookup_path)
 
-    # split multi-guide calls (";" separated) into one row per (barcode, guide)
-    lk = lk.assign(guide=lk["guide"].str.split(";")).explode("guide")
+    # split multi-guide calls (";" separated) into one row per (barcode, guide),
+    # exploding the aligned per-guide counts in parallel.
+    lk["guide"] = lk["guide"].str.split(";")
+    lk["count"] = lk["count"].str.split(";")
+    bad = lk["count"].str.len() != lk["guide"].str.len()  # mismatch -> fall back to 1s
+    lk.loc[bad, "count"] = lk.loc[bad, "guide"].apply(lambda g: ["1"] * len(g))
+    lk = lk.explode(["guide", "count"])
     lk["guide"] = lk["guide"].str.strip()
     lk = lk[~lk["guide"].str.lower().isin(_UNASSIGNED)]
+    lk["count"] = pd.to_numeric(lk["count"], errors="coerce").fillna(1).astype(np.int64)
+    lk = lk[lk["count"] > 0]
 
     # match barcodes to the GEX matrix: try as-is, then fall back to stripping a
     # trailing "-N" gem-group/lane suffix only if that improves overlap (it would
@@ -576,11 +629,12 @@ def _build_from_lookup(
     guide_index = {g: i for i, g in enumerate(guide_names)}
     bc_pos = {bc: i for i, bc in enumerate(gex.obs_names.astype(str))}
 
-    # synthesize a guides x cells count matrix: 1 UMI per assigned guide
+    # build a guides x cells count matrix using real per-guide UMI counts
+    # (falls back to 1 when the source has no count column).
     rows = [guide_index[g] for g in lk["guide"]]
     cols = [bc_pos[bc] for bc in lk["barcode"]]
     guide_mat = sparse.csr_matrix(
-        (np.ones(len(rows), dtype=np.int64), (rows, cols)),
+        (lk["count"].to_numpy(), (rows, cols)),
         shape=(len(guide_names), gex.n_obs),
     )
 
@@ -715,6 +769,129 @@ def prep_metadata_guide_matrix(series_dir: Path, out_root: Path, rule: dict) -> 
 
 
 # ---------------------------------------------------------------------------
+# Shape: dialout  (GSE157977)
+#   Per sample: a GEX-only legacy CellRanger v2 .h5 (mm10) + a "dial-out"
+#   perturbation-barcode-by-cell UMI CSV (rows=cell barcodes, cols=PBC seqs).
+#   guide_map.csv (from Table S5) maps each PBC -> target gene; 2 sgRNAs are
+#   pooled under one PBC per gene, so the synthesized CRISPR block has one
+#   feature per gene's perturbation barcode (named by the gene; GFP -> NT).
+# ---------------------------------------------------------------------------
+def _load_dialout_library(gmap_path: Path) -> tuple[dict, pd.DataFrame]:
+    """From the Table S5 guide_map, build {PBC -> perturbation_id} and a
+    PBC-level guide_map (grna=perturbation_id, target_gene)."""
+    gm = pd.read_csv(gmap_path)
+    if "perturbation_barcode" not in gm.columns:
+        raise ValueError(f"{gmap_path} lacks a 'perturbation_barcode' column.")
+    gm = gm.copy()
+    # perturbation id = the gene-level prefix of the sgRNA name (strip _g<N>).
+    gm["pert_id"] = gm["grna"].astype(str).str.replace(r"_g\d+$", "", regex=True)
+    per_pbc = (
+        gm.groupby("perturbation_barcode")
+        .agg(pert_id=("pert_id", "first"), target_gene=("target_gene", "first"))
+        .reset_index()
+    )
+    pbc_to_pert = dict(zip(per_pbc["perturbation_barcode"].astype(str),
+                           per_pbc["pert_id"].astype(str)))
+    guide_map = (
+        per_pbc[["pert_id", "target_gene"]]
+        .drop_duplicates()
+        .rename(columns={"pert_id": "grna"})
+        .reset_index(drop=True)
+    )
+    return pbc_to_pert, guide_map
+
+
+def prep_dialout(series_dir: Path, out_root: Path, rule: dict) -> list[Path]:
+    gmap_path = _find_one(series_dir, "guide_map.csv")
+    if gmap_path is None:
+        print(f"  [WARN] no guide_map.csv (Table S5) under {series_dir}")
+        _anomaly("No guide_map.csv for dial-out series",
+                 observation=f"Searched {series_dir}; build it from the paper's Table S5.",
+                 action="Create raw/<GSE>/guide_map.csv (grna,target_gene,perturbation_barcode).")
+        return []
+    pbc_to_pert, guide_map = _load_dialout_library(gmap_path)
+    n_nt = int((guide_map["target_gene"] == NT).sum())
+    print(f"  library: {len(guide_map)} perturbations ({n_nt} NT), "
+          f"{guide_map['target_gene'].nunique()} targets (incl. NT)")
+
+    dialouts = sorted(series_dir.rglob("*dialout*Counts.csv*"))
+    if not dialouts:
+        print(f"  [WARN] no dial-out *Counts.csv under {series_dir}")
+        return []
+
+    out_dirs = []
+    for dcsv in dialouts:
+        m = re.search(r"dialout\.([^.]+)", dcsv.name)
+        label = m.group(1) if m else dcsv.stem
+        h5 = next((p for p in sorted(series_dir.rglob("*.h5")) if f".{label}." in p.name), None)
+        if h5 is None:
+            print(f"  [WARN] no GEX .h5 paired with dial-out '{label}'; skipping")
+            continue
+        print(f"  sample '{label}': GEX h5 '{h5.name}' + dial-out '{dcsv.name}'")
+        try:
+            out_dirs.append(
+                _build_from_dialout(h5, dcsv, label, pbc_to_pert, guide_map,
+                                    out_root / label)
+            )
+        except Exception as exc:  # noqa: BLE001 - log and continue
+            print(f"  [WARN] dial-out build failed for {label}: {exc}")
+            _anomaly("Dial-out build failed",
+                     observation=f"sample {label}: {exc}",
+                     action="Check barcode overlap / PBC mapping for this sample.")
+    return out_dirs
+
+
+def _build_from_dialout(
+    h5: Path, dcsv: Path, sample: str, pbc_to_pert: dict,
+    guide_map: pd.DataFrame, out_dir: Path,
+) -> Path:
+    gex = sc.read_10x_h5(h5, gex_only=False)
+    gex.var_names_make_unique()
+    # GEX barcodes carry a '-1' gem suffix; dial-out cell barcodes are bare 16bp.
+    gex.obs_names = gex.obs_names.astype(str).str.replace(r"-\d+$", "", regex=True)
+
+    dial = pd.read_csv(dcsv, index_col=0)
+    dial.index = dial.index.astype(str)
+    # keep only library PBCs (drop the handful of stray/unmapped barcodes)
+    keep_cols = [c for c in dial.columns.astype(str) if c in pbc_to_pert]
+    n_drop = dial.shape[1] - len(keep_cols)
+    if n_drop:
+        print(f"  ({n_drop} dial-out barcodes not in Table S5 dropped)")
+    dial = dial.loc[:, keep_cols]
+
+    shared = gex.obs_names.intersection(pd.Index(dial.index))
+    if len(shared) == 0:
+        raise ValueError("GEX and dial-out matrices share no cell barcodes.")
+    print(f"  shared cells (GEX ∩ dial-out): {len(shared):,}")
+    gex = gex[shared].copy()
+    dial = dial.loc[shared.astype(str)]
+
+    # collapse PBC columns to one perturbation feature per gene (PBC is 1:1 with
+    # gene here, but sum defensively in case the map ever folds several PBCs).
+    pert_ids = [pbc_to_pert[c] for c in dial.columns.astype(str)]
+    guide_df = dial.T.groupby(pert_ids).sum().T  # cells x perturbations
+    guide_names = guide_df.columns.astype(str).tolist()
+    guide_mat = sparse.csr_matrix(guide_df.to_numpy().astype(np.int64)).T  # perts x cells
+
+    gex_ids = (
+        gex.var["gene_ids"].astype(str).tolist()
+        if "gene_ids" in gex.var.columns
+        else gex.var_names.astype(str).tolist()
+    )
+    features = pd.DataFrame({
+        "id": gex_ids + guide_names,
+        "name": gex.var_names.astype(str).tolist() + guide_names,
+        "feature_type": [GENE_FEATURE_TYPE] * gex.n_vars
+        + [GUIDE_FEATURE_TYPE] * len(guide_names),
+    })
+    matrix = sparse.vstack([sparse.csr_matrix(gex.X).T, guide_mat]).tocsr()
+    # write the FULL library guide_map (model ignores perturbations not in the
+    # matrix, and requires >=1 NT row -- the GFP control supplies it).
+    write_10x_dir(out_dir, matrix, features, shared.astype(str).tolist(), guide_map)
+    return out_dir
+
+
+# ---------------------------------------------------------------------------
 # Optional: invoke model/prepare_perturb_h5ad.py on each normalized dir
 # ---------------------------------------------------------------------------
 def run_prepare(input_dir: Path, result_root: Path, rule: dict) -> int:
@@ -744,6 +921,7 @@ SHAPE_DISPATCH = {
     "split_gex_guide": prep_split_gex_guide,
     "lookup": prep_lookup,
     "metadata_guide_matrix": prep_metadata_guide_matrix,
+    "dialout": prep_dialout,
 }
 
 

@@ -8,6 +8,9 @@ For every dataset/sample it records:
   * number of features, split into Gene Expression and CRISPR Guide Capture
   * number of guide RNAs, distinct target genes, and non-targeting (NT) guides
     (from guide_map.csv when available)
+  * per-cell guide capture (``--deep``): share of cells with >=1 guide, the
+    per-cell guide-UMI fraction (mean/median %) and guides per cell / MOI
+    (mean/median) -- guide-UMI fraction is omitted for dial-out samples (no GEX UMIs)
   * a guide-dominance check (``--deep``): the single guide carrying the largest
     share of guide UMIs, its UMI fraction and how ubiquitous it is across cells
     -- this is what surfaces pathological guides like FOXO4.4 in GSE311503 D1.
@@ -28,6 +31,7 @@ import gzip
 import re
 from pathlib import Path
 
+import h5py
 import numpy as np
 import pandas as pd
 import scanpy as sc
@@ -97,6 +101,21 @@ def discover_samples(series_dir: Path) -> list[dict]:
     entries: list[dict] = []
     for sample, parts in geo_utils.find_triples(series_dir).items():
         entries.append({"sample": sample, "kind": "triple", "parts": parts})
+    # GSE157977-style dial-out layout: a GEX-only (legacy CellRanger v2) .h5 per
+    # sample plus a separate perturbation-barcode-by-cell "dial-out" count CSV.
+    # Guides are not in the h5 (v2 predates feature_types); the PBC->gene map
+    # comes from guide_map.csv (built from the paper's Table S5).
+    dialouts = sorted(series_dir.rglob("*dialout*Counts.csv*"))
+    if dialouts:
+        gmap = _find_named(series_dir, "guide_map", suffixes=(".csv",))
+        for dcsv in dialouts:
+            m = re.search(r"dialout\.([^.]+)", dcsv.name)
+            label = m.group(1) if m else dcsv.stem
+            h5 = next((p for p in sorted(series_dir.rglob("*.h5"))
+                       if f".{label}." in p.name), None)
+            entries.append({"sample": label, "kind": "dialout",
+                            "dialout": dcsv, "h5": h5, "guide_map": gmap})
+        return entries
     for h5 in sorted(series_dir.rglob("*.h5")):
         entries.append({"sample": h5.stem, "kind": "h5", "h5": h5})
     # GSE236057-style raw layout: non-standard-named GEX matrix + a metadata CSV
@@ -111,6 +130,34 @@ def discover_samples(series_dir: Path) -> list[dict]:
             "metadata": _find_named(series_dir, "metadata", suffixes=(".csv.gz", ".csv")),
         })
     return entries
+
+
+def _h5_gene_count(h5_path: Path) -> int | None:
+    """Number of genes in a legacy CellRanger v2 .h5 (genome group with genes)."""
+    try:
+        with h5py.File(h5_path, "r") as f:
+            for k in f.keys():
+                grp = f[k]
+                if hasattr(grp, "keys"):
+                    for key in ("genes", "gene_names"):
+                        if key in grp:
+                            return int(grp[key].shape[0])
+    except Exception:
+        return None
+    return None
+
+
+def _mean_guides_per_gene(targets: list[str]) -> float | None:
+    """Mean number of guides per *targeting* gene (NT controls excluded).
+
+    ``targets`` is one entry per guide (the guide's target gene). Returns the
+    average library coverage, e.g. 1 gene tiled by 4 guides -> 4.0.
+    """
+    genes = [t for t in targets if t != "NT"]
+    if not genes:
+        return None
+    s = pd.Series(genes)
+    return round(float(s.groupby(s).size().mean()), 2)
 
 
 def _target_from_guide(col: str) -> str:
@@ -142,6 +189,36 @@ def _guide_dominance_from_matrix(
     }
 
 
+def _per_cell_guide_stats(guide_cells_x_guides, total_umi_per_cell=None) -> dict:
+    """Per-cell guide-capture summary over all cells.
+
+    ``guide_cells_x_guides`` is the CRISPR block oriented cells (rows) x guides
+    (cols). ``total_umi_per_cell`` (UMI sum across all features) is the
+    denominator for the guide-UMI fraction; pass None when GEX UMIs are not
+    available (e.g. dial-out), in which case the fraction is left unset.
+
+    Returns pct_cells_with_guide, guide_umi_frac mean/median (%), moi mean/median.
+    """
+    g = sparse.csr_matrix(guide_cells_x_guides)
+    n_cells = g.shape[0]
+    if n_cells == 0:
+        return {}
+    guide_umi = np.asarray(g.sum(axis=1)).ravel().astype(float)
+    moi = np.asarray((g > 0).sum(axis=1)).ravel().astype(float)
+    out = {
+        "pct_cells_with_guide": round(100.0 * float((moi > 0).sum()) / n_cells, 2),
+        "moi_mean": round(float(np.mean(moi)), 2),
+        "moi_median": round(float(np.median(moi)), 2),
+    }
+    if total_umi_per_cell is not None:
+        total = np.asarray(total_umi_per_cell, dtype=float).ravel()
+        with np.errstate(divide="ignore", invalid="ignore"):
+            frac = np.where(total > 0, guide_umi / total * 100.0, 0.0)
+        out["guide_umi_frac_mean"] = round(float(np.mean(frac)), 2)
+        out["guide_umi_frac_median"] = round(float(np.median(frac)), 2)
+    return out
+
+
 def inspect_sample(
     series: str, stage: str, entry: dict, *, deep: bool, max_deep_bytes: int, root: Path
 ) -> dict:
@@ -149,7 +226,10 @@ def inspect_sample(
     rec = {
         "series": series, "stage": stage, "sample": sample,
         "n_cells": None, "n_features": None, "n_gene_expr": None, "n_guides": None,
-        "n_targets": None, "n_nt": None,
+        "n_targets": None, "n_nt": None, "guides_per_gene": None,
+        "pct_cells_with_guide": None,
+        "guide_umi_frac_mean": None, "guide_umi_frac_median": None,
+        "moi_mean": None, "moi_median": None,
         "top_guide": "", "top_guide_umi_frac": None, "top_guide_ubiquity": None,
         "notes": "",
     }
@@ -170,6 +250,9 @@ def inspect_sample(
             rec["n_guides"] = rec["n_guides"] or len(df)
             rec["n_targets"] = int(df["target_gene"].nunique())
             rec["n_nt"] = int((df["target_gene"] == "NT").sum())
+            rec["guides_per_gene"] = _mean_guides_per_gene(
+                df["target_gene"].astype(str).tolist()
+            )
         # deep guide-dominance check
         if deep and "features" in parts and (rec["n_guides"] or 0) > 0:
             size = parts["matrix"].stat().st_size
@@ -180,10 +263,14 @@ def inspect_sample(
                 ft = adata.var["feature_types"].astype(str)
                 gmask = ft.eq(GUIDE_FT).to_numpy()
                 if gmask.any():
+                    guide_X = adata[:, gmask].X
                     dom = _guide_dominance_from_matrix(
-                        adata[:, gmask].X, adata.var_names[gmask].astype(str).tolist()
+                        guide_X, adata.var_names[gmask].astype(str).tolist()
                     )
                     rec.update(dom)
+                    total_umi = np.asarray(
+                        sparse.csr_matrix(adata.X).sum(axis=1)).ravel()
+                    rec.update(_per_cell_guide_stats(guide_X, total_umi))
 
     elif entry["kind"] == "named_matrix":
         if entry.get("barcodes"):
@@ -198,9 +285,10 @@ def inspect_sample(
             gcols = [c for c in hdr if re.match(r"(?i)^(enh|pos|neg)", str(c))]
             if gcols:
                 rec["n_guides"] = len(gcols)
-                targets = {_target_from_guide(c) for c in gcols}
-                rec["n_targets"] = len(targets)
+                per_guide_target = [_target_from_guide(c) for c in gcols]
+                rec["n_targets"] = len(set(per_guide_target))
                 rec["n_nt"] = sum(1 for c in gcols if re.match(r"(?i)^neg", str(c)))
+                rec["guides_per_gene"] = _mean_guides_per_gene(per_guide_target)
                 notes.append("guides embedded as a wide boolean matrix in the "
                              "metadata CSV (synthesized into a CRISPR block by 02)")
         else:
@@ -218,12 +306,62 @@ def inspect_sample(
             rec["n_guides"] = int(ft.eq(GUIDE_FT).sum())
             if deep and rec["n_guides"]:
                 gmask = ft.eq(GUIDE_FT).to_numpy()
+                guide_X = adata[:, gmask].X
                 dom = _guide_dominance_from_matrix(
-                    adata[:, gmask].X, adata.var_names[gmask].astype(str).tolist()
+                    guide_X, adata.var_names[gmask].astype(str).tolist()
                 )
                 rec.update(dom)
+                total_umi = np.asarray(
+                    sparse.csr_matrix(adata.X).sum(axis=1)).ravel()
+                rec.update(_per_cell_guide_stats(guide_X, total_umi))
         else:
             notes.append("h5 has no feature_types column")
+
+    elif entry["kind"] == "dialout":
+        # GEX gene count from the paired (GEX-only) h5 -- header read, no matrix load.
+        if entry.get("h5") is not None:
+            n_g = _h5_gene_count(entry["h5"])
+            if n_g:
+                rec["n_features"] = rec["n_gene_expr"] = n_g
+        # library (PBC -> gene) from the Table S5-derived guide_map.csv.
+        pbc2gene: dict[str, str] = {}
+        gmap = entry.get("guide_map")
+        if gmap is not None and gmap.exists():
+            gm = pd.read_csv(gmap)
+            rec["n_guides"] = len(gm)
+            rec["n_targets"] = int(gm["target_gene"].nunique())
+            rec["n_nt"] = int((gm["target_gene"] == "NT").sum())
+            rec["guides_per_gene"] = _mean_guides_per_gene(
+                gm["target_gene"].astype(str).tolist()
+            )
+            if "perturbation_barcode" in gm.columns:
+                pbc2gene = dict(zip(gm["perturbation_barcode"].astype(str),
+                                    gm["target_gene"].astype(str)))
+            notes.append("library = Table S5 (2 sgRNAs/gene, 1 dial-out barcode/gene, "
+                         "GFP control mapped to NT)")
+        else:
+            notes.append("no guide_map.csv (Table S5) found; PBCs unmapped")
+        # dial-out matrix: cells with a perturbation call (+ dominance over PBCs).
+        dial = pd.read_csv(entry["dialout"], index_col=0)
+        rec["n_cells"] = int(dial.shape[0])
+        cols = [str(c) for c in dial.columns]
+        n_detected = len(cols)
+        n_unknown = sum(1 for c in cols if pbc2gene and c not in pbc2gene)
+        note = f"{n_detected} perturbation barcodes detected in this sample"
+        if n_unknown:
+            note += f" ({n_unknown} not in Table S5)"
+        notes.append(note)
+        if deep and n_detected:
+            rec.update(_per_cell_guide_stats(sparse.csr_matrix(dial.to_numpy())))
+            colsum = dial.sum(axis=0).astype(float)
+            ubiq = (dial > 0).sum(axis=0) / max(1, dial.shape[0])
+            total = float(colsum.sum())
+            if total > 0:
+                top = str(colsum.idxmax())
+                gene = pbc2gene.get(top, "?")
+                rec["top_guide"] = f"{gene} [{top}]"
+                rec["top_guide_umi_frac"] = round(float(colsum[top]) / total, 4)
+                rec["top_guide_ubiquity"] = round(float(ubiq[top]), 4)
 
     # anomaly flags
     frac = rec["top_guide_umi_frac"]
@@ -277,11 +415,23 @@ def write_reports(records: list[dict], out_dir: Path) -> tuple[Path, Path]:
                     dom = (f"  \n    top guide: `{r['top_guide']}` "
                            f"({_fmt_pct(r['top_guide_umi_frac'])} of guide UMIs, "
                            f"{_fmt_pct(r['top_guide_ubiquity'])} of cells)")
+                cap = ""
+                if r.get("pct_cells_with_guide") is not None:
+                    parts_cap = [f"cells w/ guide={_fmt_num(r['pct_cells_with_guide'])}%"]
+                    if r.get("guide_umi_frac_mean") is not None:
+                        parts_cap.append(
+                            f"guide UMI%/cell mean={_fmt_num(r['guide_umi_frac_mean'])} "
+                            f"median={_fmt_num(r['guide_umi_frac_median'])}")
+                    parts_cap.append(
+                        f"MOI mean={_fmt_num(r['moi_mean'])} "
+                        f"median={_fmt_num(r['moi_median'])}")
+                    cap = "  \n    guide capture: " + ", ".join(parts_cap)
                 lines.append(
                     f"- **[{r['stage']}] {r['sample']}** — "
                     f"cells={_fmt(r['n_cells'])}, features={_fmt(r['n_features'])} "
                     f"(GEX={_fmt(r['n_gene_expr'])}, guides={_fmt(r['n_guides'])}), "
-                    f"targets={_fmt(r['n_targets'])}, NT={_fmt(r['n_nt'])}{dom}"
+                    f"targets={_fmt(r['n_targets'])}, NT={_fmt(r['n_nt'])}, "
+                    f"guides/gene={_fmt_num(r['guides_per_gene'])}{dom}{cap}"
                 )
                 if r["notes"]:
                     lines.append(f"    - notes: {r['notes']}")
@@ -292,6 +442,10 @@ def write_reports(records: list[dict], out_dir: Path) -> tuple[Path, Path]:
 
 def _fmt(v) -> str:
     return "-" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{int(v):,}"
+
+
+def _fmt_num(v) -> str:
+    return "-" if v is None or (isinstance(v, float) and np.isnan(v)) else f"{float(v):g}"
 
 
 def _fmt_pct(v) -> str:
@@ -310,8 +464,10 @@ def main() -> None:
                         help="Data root containing raw/ and/or processed/ (01 --outdir / 02 --out-root).")
     parser.add_argument("--series", default=None,
                         help="Comma-separated GEO IDs to inspect (default: all found).")
-    parser.add_argument("--which", choices=["raw", "processed", "both"], default="both",
-                        help="Which stage(s) to inspect.")
+    parser.add_argument("--which", choices=["raw", "processed", "both", "auto"], default="auto",
+                        help="Which stage(s) to inspect. 'auto' (default) reports processed "
+                             "samples, falling back to raw only for series that have no "
+                             "processed dir (e.g. GSE278572, too large to process here).")
     parser.add_argument("--deep", action="store_true",
                         help="Load matrices to compute guide-dominance stats (slower).")
     parser.add_argument("--max-deep-bytes", type=int, default=DEFAULT_MAX_DEEP_BYTES,
@@ -324,11 +480,19 @@ def main() -> None:
     out_dir = args.out or geo_utils.logs_root(args.root)
     want = {s.strip() for s in args.series.split(",")} if args.series else None
 
+    processed_root = geo_utils.processed_root(args.root)
+    # Series that have a processed dir -- in 'auto' mode these are taken from
+    # processed only, and raw is consulted just for series missing from here.
+    processed_series = (
+        {p.name for p in processed_root.iterdir() if p.is_dir()}
+        if processed_root.exists() else set()
+    )
+
     stage_roots = []
-    if args.which in ("raw", "both"):
+    if args.which in ("raw", "both", "auto"):
         stage_roots.append(("raw", geo_utils.raw_root(args.root)))
-    if args.which in ("processed", "both"):
-        stage_roots.append(("processed", geo_utils.processed_root(args.root)))
+    if args.which in ("processed", "both", "auto"):
+        stage_roots.append(("processed", processed_root))
 
     records: list[dict] = []
     for stage, stage_root in stage_roots:
@@ -338,6 +502,9 @@ def main() -> None:
         for series_dir in sorted(p for p in stage_root.iterdir() if p.is_dir()):
             series = series_dir.name
             if want and series not in want:
+                continue
+            # auto: only fall back to raw for series with no processed dir
+            if args.which == "auto" and stage == "raw" and series in processed_series:
                 continue
             entries = discover_samples(series_dir)
             if not entries:
