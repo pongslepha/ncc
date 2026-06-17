@@ -4,7 +4,11 @@ Purpose
 - Precise examples and CLI snippets for running `model/` functions and the GRIT model.
 
 Entry points
-- `prepare_perturb_h5ad.py`: dataset preparation helper.
+- `perturbseq/analysis/xx.script/01.download_geo.py`: raw GEO downloader into `perturbseq/analysis/00.data`.
+- `perturbseq/analysis/xx.script/02.prepare_h5ad.py`: data normalization and `h5ad` preparation for `perturbseq/analysis/01.result`.
+- `perturbseq/analysis/xx.script/03.inspect_data.py`: raw/processed dataset inspection and report writer.
+- `perturbseq/analysis/xx.script/04.check_guide_matrix.py`: guide matrix validation for processed 10X directories.
+- `prepare_perturb_h5ad.py`: dataset preparation helper in the read-only model directory.
 - `model_a_perturbation_transition_pytorch.py`: primary model implementation (GRIT-compatible entrypoints).
 - `run_model.sh`: example wrapper script to run training/evaluation.
 
@@ -14,6 +18,15 @@ Common commands
 
 ```bash
 python perturbseq/model/prepare_perturb_h5ad.py --help
+```
+
+- Run the canonical data workflow:
+
+```bash
+python perturbseq/analysis/xx.script/01.download_geo.py --series GSE142078,GSE208240,GSE236057,GSE272457,GSE278572,GSE280506,GSE311503 --outdir perturbseq/analysis/00.data --extract
+python perturbseq/analysis/xx.script/02.prepare_h5ad.py --series GSE142078,GSE208240,GSE236057,GSE272457,GSE278572,GSE280506,GSE311503 --data-root perturbseq/analysis/00.data --out-root perturbseq/analysis/00.data --run-prepare --result-root perturbseq/analysis/01.result
+python perturbseq/analysis/xx.script/03.inspect_data.py --root perturbseq/analysis/00.data --deep
+python perturbseq/analysis/xx.script/04.check_guide_matrix.py --root perturbseq/analysis/00.data
 ```
 
 - Run the model wrapper:

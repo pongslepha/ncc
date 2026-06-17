@@ -5,6 +5,7 @@ Capabilities
 - Prepare reproducible Python virtualenv `perturb` and install required packages.
 - Execute smoke-tests and simple runs of GRIT-compatible model code.
 - Build GEO data download wrappers for specified perturb-seq datasets and normalize them to `AnnData` if possible.
+- Orchestrate the repository's analysis wrappers: `01.download_geo.py`, `02.prepare_h5ad.py`, `03.inspect_data.py`, and `04.check_guide_matrix.py`.
 
 Constraints
 - The agent treats `perturbseq/model/` as read-only: it will never modify files inside `model/`.

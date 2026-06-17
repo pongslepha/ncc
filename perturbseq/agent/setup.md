@@ -47,3 +47,26 @@ pip freeze > perturbseq/agent/env_packages.md
 python perturbseq/model/prepare_perturb_h5ad.py --help
 bash perturbseq/model/run_model.sh
 ```
+
+7) Run the canonical analysis workflow using the repository wrappers:
+
+```bash
+python perturbseq/analysis/xx.script/01.download_geo.py \
+    --series GSE142078,GSE208240,GSE236057,GSE272457,GSE278572,GSE280506,GSE311503 \
+    --outdir perturbseq/analysis/00.data --extract
+
+python perturbseq/analysis/xx.script/02.prepare_h5ad.py \
+    --series GSE142078,GSE208240,GSE236057,GSE272457,GSE278572,GSE280506,GSE311503 \
+    --data-root perturbseq/analysis/00.data \
+    --out-root perturbseq/analysis/00.data \
+    --run-prepare \
+    --result-root perturbseq/analysis/01.result
+
+python perturbseq/analysis/xx.script/03.inspect_data.py --root perturbseq/analysis/00.data --deep
+python perturbseq/analysis/xx.script/04.check_guide_matrix.py --root perturbseq/analysis/00.data
+```
+
+8) Review the logs and outputs:
+
+- `perturbseq/analysis/00.data/logs/` for raw/processed inspection reports and anomalies.
+- `perturbseq/analysis/01.result/` for generated `.h5ad` files, QC plots, and result tables.

@@ -9,9 +9,9 @@ Purpose
 Primary responsibilities
 - Environment provisioning: create and manage a `perturb` virtualenv and record installed packages.
 - Data acquisition: download raw or processed single-cell RNA-seq and gRNA metadata from GEO for target datasets, including GSE142078, GSE157977, GSE208240, GSE236057, GSE252965, GSE272457, GSE278572, GSE280506, and GSE311503. Two of these are downloaded for reference but are NOT Perturb-seq-pipeline-compatible: GSE252965 (ATAC-seq only) and GSE157977 (guides recorded only as protospacer sequences, with no protospacer→gene reference or NT label); both are skipped downstream with anomaly-log entries.
-- Data prep: run and validate `prepare_perturb_h5ad.py` or alternative ingestion wrappers to produce a Scanpy `AnnData` with `X`, `obsm['gRNA_counts']`, and guide metadata.
-- Model training/inference: run GRIT training/inference entrypoints in `model/` and produce the canonical output files (cell-level results, GRIT score metadata, DE-like gene lists).
-- Downstream analysis: single-cell QC, normalization, dimensionality reduction, clustering, and cell-state inference using model outputs and `gRNA_counts`.
+- Data prep: use `perturbseq/analysis/xx.script/01.download_geo.py` to fetch raw GEO inputs into `perturbseq/analysis/00.data`, then normalize them with `perturbseq/analysis/xx.script/02.prepare_h5ad.py` to produce canonical 10X directories, `guide_map.csv`, and `h5ad` outputs under `perturbseq/analysis/01.result`.
+- Model training/inference: run GRIT training/inference entrypoints in `model/` and produce the canonical output files (cell-level results, GRIT score metadata, DE-like gene lists), while keeping `perturbseq/model/` read-only.
+- Downstream analysis: use `perturbseq/analysis/xx.script/03.inspect_data.py` for dataset inspection and `perturbseq/analysis/xx.script/04.check_guide_matrix.py` to validate guide matrices before generating plots and summary statistics.
 - Scoring & statistics: compute per-target GRIT scores, differential expression between NT and perturbed groups (and optionally by cell-state), and generate per-gene statistics suitable for plotting and GSEA.
 - Visualization: produce publication-ready bar plots (GRIT per target), volcano plots (effect size vs p-value), and heatmaps (top responding genes across targets/cell-states).
 - Gene set enrichment: run GSEA / ORA on sets of up- and down-regulated genes between NT and perturbed groups (supports `gseapy` or `gprofiler` as backends).
@@ -22,6 +22,8 @@ Workflow (Plan → Act → Check)
 - Check: validate each stage with smoke-tests and artifact checks (file existence, basic sanity metrics, import tests). For plots, check that expected numbers of genes/targets appear and that volcano plots show non-empty significant sets. On failure, produce an actionable error report and attempt fixes when safe.
   - When a validation step needs more than a one-line check, the agent may create a dedicated, single-purpose script (under `perturbseq/analysis/` or `perturbseq/agent/`) to perform the inspection and run it. For example, after a GEO download create an `inspect_data.py` that loads the downloaded matrices/`AnnData` and reports shapes, cell/gene counts, `obsm['gRNA_counts']` presence, NT vs. perturbed group sizes, and obvious QC red flags. Likewise, write small check scripts to inspect intermediate `h5ad` files, GRIT output tables, or plot inputs before proceeding to the next stage.
   - These check scripts are inspection-only utilities: they import from `perturbseq/model/` if needed but never modify it, and they should print a clear pass/fail summary so the result is easy to verify and reproduce.
+- Logging: record a log entry for every task performed. Preserve existing log files by appending or creating a new file for each run rather than overwriting prior logs, and ensure logs are saved to a dedicated path so previous logs remain available alongside new logs.
+  - Expected log locations include `perturbseq/analysis/00.data/logs/` for raw/processed data inspection and `perturbseq/analysis/01.result/` for result artifacts.
 
 Agent usage
 - Follow the numbered steps in `setup.md` to create the virtualenv and install packages.
