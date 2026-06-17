@@ -1,7 +1,7 @@
 # perturbseq
 
 Analysis scaffolding around the GRIT perturbation-transition model. The
-workflow takes heterogeneous GEO Perturb-seq datasets, normalizes them into a
+workflow takes heterogeneous GEO Perturb-seq datasets, reshapes them into a
 canonical 10X form, builds a preprocessed `.h5ad`, runs the GRIT model, and
 produces downstream plots and gene-set enrichment.
 
@@ -13,15 +13,16 @@ perturbseq/
 │   ├── prepare_perturb_h5ad.py            # 10X dir + guide_map.csv -> preprocessed .h5ad
 │   ├── model_a_perturbation_transition_pytorch.py
 │   ├── model_a_config.yaml
-│   └── run_model.sh                       # GRIT entrypoint
+│   ├── run_model.sh                       # GRIT entrypoint
+│   └── compute_guide_consistency_summary.py  # QC: do same-gene gRNAs give consistent signatures?
 ├── analysis/
 │   ├── xx.script/         # analysis-side scripts (everything you run)
 │   │   ├── 01.download_geo.py             # format-aware GEO downloader
-│   │   ├── 02.prepare_h5ad.py             # normalize -> 10X + guide_map, run model prepare
+│   │   ├── 02.prepare_h5ad.py             # reshape -> 10X + guide_map, run model prepare
 │   │   ├── 03.inspect_data.py             # raw/processed data inspection and report generation
 │   │   ├── 04.check_guide_matrix.py       # processed guide matrix sanity checks
 │   │   ├── 10.run_pipeline.py             # optional end-to-end run wrapper
-│   ├── 00.data/           # downloaded + normalized data (per GSE)
+│   ├── 00.data/           # raw/ downloads + processed/ 10X inputs + logs/ (per GSE)
 │   └── 01.result/         # model prepare / GRIT outputs
 └── agent/                 # agent role, setup, and environment docs
 ```
@@ -73,11 +74,14 @@ python perturbseq/analysis/xx.script/01.download_geo.py --series all \
 
 Each series lands under `perturbseq/analysis/00.data/<GSE>/`.
 
-### 2. Normalize + prepare — `02.prepare_h5ad.py`
+### 2. Reshape + prepare — `02.prepare_h5ad.py`
 
 This script reshapes heterogeneous raw inputs into a canonical per-sample 10X
-directory that `perturbseq/model/prepare_perturb_h5ad.py` consumes. The
-normalized output shape is:
+directory that `perturbseq/model/prepare_perturb_h5ad.py` consumes. This is a
+**format-only** step — matrices are reshaped and written as integer counts; no
+statistical normalization (CP10K / log1p / z-score) and no QC filtering happen
+here (those are done by the model script in step 2's `--run-prepare`). The
+canonical output shape is:
 
 ```
 <out-root>/<GSE>/<sample>/
@@ -123,8 +127,10 @@ Because guide UMIs are real for some samples and synthesized (all-1) for others,
 be used as a quantitative feature across datasets.
 
 When `--run-prepare` is provided, `02.prepare_h5ad.py` also invokes the
-read-only `perturbseq/model/prepare_perturb_h5ad.py` on each normalized sample
+read-only `perturbseq/model/prepare_perturb_h5ad.py` on each reshaped sample
 dir and writes the resulting `.h5ad` files into `perturbseq/analysis/01.result/`.
+The model script is where the actual normalization happens (`sc.pp.normalize_total`
+→ `log1p` → `regress_out` → `scale`), along with QC filtering and guide calling.
 Incompatible series are logged and skipped with anomaly entries.
 
 ```bash
@@ -155,7 +161,7 @@ python perturbseq/analysis/xx.script/03.inspect_data.py \
 ### 4. Validate guide matrices — `04.check_guide_matrix.py`
 
 This script checks processed 10X directories under `perturbseq/analysis/00.data/processed/`
-or similar normalized paths and validates that the CRISPR Guide Capture block is
+or similar reshaped paths and validates that the CRISPR Guide Capture block is
 present and consistent with `guide_map.csv`.
 It writes a human-readable log to
 `perturbseq/analysis/00.data/logs/guide_matrix_check.log`.

@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""Normalize heterogeneous GEO Perturb-seq downloads into the canonical 10X
+"""Reshape heterogeneous GEO Perturb-seq downloads into the canonical 10X
 input that ``perturbseq/model/prepare_perturb_h5ad.py`` consumes, then
 (optionally) run that model script to emit the final ``.h5ad``.
+
+This is a FORMAT-only step: matrices are reshaped to a standard 10X layout and
+written as integer counts. No statistical normalization (CP10K / log1p /
+z-score) and no QC filtering happen here -- those are done by the model script.
 
 Why this script exists
 ----------------------
@@ -12,7 +16,7 @@ So it requires a SINGLE 10X directory holding one combined matrix plus a
 ``guide_map.csv``.
 
 The GEO series do not all ship that shape. This script reshapes each
-into a normalized per-sample directory (raw data is read from
+into a canonical per-sample directory (raw data is read from
 <data-root>/raw/<GSE>/, written under <out-root>/processed/<GSE>/<sample>/):
 
     <out-root>/processed/<GSE>/<sample>/
@@ -892,7 +896,7 @@ def _build_from_dialout(
 
 
 # ---------------------------------------------------------------------------
-# Optional: invoke model/prepare_perturb_h5ad.py on each normalized dir
+# Optional: invoke model/prepare_perturb_h5ad.py on each reshaped 10X dir
 # ---------------------------------------------------------------------------
 def run_prepare(input_dir: Path, result_root: Path, rule: dict) -> int:
     if not MODEL_PREPARE.exists():
@@ -927,8 +931,9 @@ SHAPE_DISPATCH = {
 
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Normalize GEO Perturb-seq downloads into 10X + guide_map; "
-        "optionally run model/prepare_perturb_h5ad.py.",
+        description="Reshape GEO Perturb-seq downloads into canonical 10X + "
+        "guide_map (format only, integer counts); optionally run "
+        "model/prepare_perturb_h5ad.py.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
     parser.add_argument("--series", required=True, help="Comma-separated GEO series IDs.")
@@ -939,7 +944,7 @@ def main() -> None:
         "--out-root",
         type=Path,
         required=True,
-        help="Root for normalized 10X dirs (<out-root>/<GSE>/<sample>/).",
+        help="Root for reshaped 10X dirs (<out-root>/<GSE>/<sample>/).",
     )
     parser.add_argument(
         "--shape",
@@ -950,7 +955,7 @@ def main() -> None:
     parser.add_argument(
         "--run-prepare",
         action="store_true",
-        help="Run model/prepare_perturb_h5ad.py on each normalized dir.",
+        help="Run model/prepare_perturb_h5ad.py on each reshaped 10X dir.",
     )
     parser.add_argument(
         "--result-root",
@@ -995,17 +1000,17 @@ def main() -> None:
             summary.append((series, "no data"))
             continue
 
-        # Normalized 10X dirs go under <out-root>/processed/<GSE>/<sample>/.
+        # Reshaped 10X dirs go under <out-root>/processed/<GSE>/<sample>/.
         out_root = geo_utils.processed_root(args.out_root) / series
-        normalized = SHAPE_DISPATCH[shape](series_dir, out_root, rule)
-        if not normalized:
+        reshaped = SHAPE_DISPATCH[shape](series_dir, out_root, rule)
+        if not reshaped:
             summary.append((series, "no output"))
             continue
 
         made_h5ad = 0
         if args.run_prepare:
             result_root = args.result_root or (args.out_root / "01.result" / series)
-            for input_dir in normalized:
+            for input_dir in reshaped:
                 rc = run_prepare(input_dir, result_root, rule)
                 h5ad_path = result_root / f"{input_dir.name}.h5ad"
                 if rc == 0 and h5ad_path.exists():
@@ -1020,7 +1025,7 @@ def main() -> None:
                                "guide_map mismatch) and re-run on this sample.",
                     )
         summary.append(
-            (series, f"{len(normalized)} 10X dir(s)" + (f", {made_h5ad} h5ad" if args.run_prepare else ""))
+            (series, f"{len(reshaped)} 10X dir(s)" + (f", {made_h5ad} h5ad" if args.run_prepare else ""))
         )
 
     log.info("\n=== summary ===")
